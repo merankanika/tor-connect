@@ -97,7 +97,7 @@ do_tor() {
   tar -C "$SRC" -xf "$DL/tor.tgz"
   cd "$SRC/tor-${TOR_VERSION}"
   ./configure --host="$HOST" --prefix="$PREFIX" \
-    --disable-asciidoc --disable-manpage --disable-html-manual --disable-unittests \
+    --disable-asciidoc --disable-manpage --disable-html-manual --disable-unittests --disable-tool-name-check \
     --disable-systemd --disable-seccomp --disable-libscrypt --disable-lzma --disable-zstd \
     --disable-module-relay --disable-module-dirauth \
     --with-libevent-dir="$PREFIX" --with-openssl-dir="$PREFIX" --with-zlib-dir="$PREFIX" \
