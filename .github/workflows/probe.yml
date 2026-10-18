@@ -1,0 +1,64 @@
+name: probe-win7
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/**"
+      - "cmd/**"
+      - "go.mod"
+      - ".github/workflows/probe.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      # Go 1.20 — последняя версия, поддерживающая Windows 7 / Server 2008 R2
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: "1.20.14"
+          cache: false
+
+      - name: Install mingw-w64 (win32 threads, msvcrt)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mingw-w64 make perl curl ca-certificates binutils-mingw-w64-x86-64
+          sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-win32
+          x86_64-w64-mingw32-gcc -v 2>&1 | tail -n 3
+
+      - name: Build zlib, libevent, OpenSSL, Tor (static)
+        run: bash scripts/build-win-deps.sh
+
+      - name: Build Go probe (cgo, single process)
+        env:
+          CGO_ENABLED: "1"
+          GOOS: windows
+          GOARCH: amd64
+          CC: x86_64-w64-mingw32-gcc
+        run: |
+          TORSRC="$(echo "$PWD"/build/src/tor-*)"
+          LIBS="$(find "$TORSRC/src" -name '*.a' | sort | tr '\n' ' ')"
+          export CGO_CFLAGS="-O2 -D_WIN32_WINNT=0x0601 -I$TORSRC/src/feature/api -I$PWD/build/prefix/include"
+          export CGO_LDFLAGS="-L$PWD/build/prefix/lib -Wl,--start-group $LIBS -levent -lssl -lcrypto -lz -Wl,--end-group -lws2_32 -liphlpapi -lcrypt32 -lgdi32 -ladvapi32 -luser32 -lbcrypt -lshlwapi -static"
+          mkdir -p dist
+          go build -trimpath -ldflags="-s -w" -o dist/probe-win64.exe ./cmd/probe
+          ls -l dist
+
+      - name: Win7 sanity (imported DLLs, no UCRT)
+        run: |
+          x86_64-w64-mingw32-objdump -p dist/probe-win64.exe | grep "DLL Name" | sort -u | tee dist/imports.txt
+          if grep -Ei 'api-ms-win-crt|ucrtbase' dist/imports.txt; then echo "ОШИБКА: бинарник требует UCRT (не запустится на голой Win7)"; exit 1; fi
+          ( cd dist && sha256sum probe-win64.exe > SHA256SUMS && cat SHA256SUMS )
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: probe-win64
+          path: dist/
+          if-no-files-found: error
