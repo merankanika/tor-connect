@@ -33,8 +33,23 @@ jobs:
           sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-win32
           x86_64-w64-mingw32-gcc -v 2>&1 | tail -n 3
 
+      - name: Restore deps cache
+        id: depscache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: build
+          key: deps-${{ hashFiles('scripts/versions.env', 'scripts/build-win-deps.sh') }}
+
       - name: Build zlib, libevent, OpenSSL, Tor (static)
+        if: steps.depscache.outputs.cache-hit != 'true'
         run: bash scripts/build-win-deps.sh
+
+      - name: Save deps cache
+        if: steps.depscache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: build
+          key: deps-${{ hashFiles('scripts/versions.env', 'scripts/build-win-deps.sh') }}
 
       - name: Build Go probe (cgo, single process)
         env:

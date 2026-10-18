@@ -1,0 +1,9 @@
+build/
+dist/
+*.exe
+*.log
+config.json
+torrc.local
+bridges.local*
+*.key
+*.pem
