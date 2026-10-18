@@ -16,6 +16,8 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -83,3 +85,24 @@ jobs:
           name: probe-win64
           path: dist/
           if-no-files-found: error
+
+      - name: Publish build info
+        run: |
+          {
+            echo "size: $(stat -c %s dist/probe-win64.exe) bytes"
+            cat dist/SHA256SUMS
+            echo "imported DLLs:"; cat dist/imports.txt
+          } > build/info.txt
+          body="$(cat build/info.txt)"
+          body="${body//'%'/'%25'}"; body="${body//$'\n'/'%0A'}"
+          echo "::notice title=probe build info::${body}"
+
+      - name: Publish pre-release (probe-latest)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete probe-latest --yes --cleanup-tag || true
+          gh release create probe-latest dist/probe-win64.exe dist/SHA256SUMS dist/imports.txt \
+            --prerelease --target "$GITHUB_SHA" \
+            --title "probe (последняя сборка, Windows x64)" \
+            --notes "Пробная сборка: Tor ${TOR_VERSION:-0.4.9.x} внутри одного процесса. Только для проверки на Windows 7+. Коммит $GITHUB_SHA."
