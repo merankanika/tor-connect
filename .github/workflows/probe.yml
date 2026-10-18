@@ -48,7 +48,13 @@ jobs:
           export CGO_CFLAGS="-O2 -D_WIN32_WINNT=0x0601 -I$TORSRC/src/feature/api -I$PWD/build/prefix/include"
           export CGO_LDFLAGS="-L$PWD/build/prefix/lib -Wl,--start-group $LIBS -levent -lssl -lcrypto -lz -Wl,--end-group -lws2_32 -liphlpapi -lcrypt32 -lgdi32 -ladvapi32 -luser32 -lbcrypt -lshlwapi -static"
           mkdir -p dist
-          go build -trimpath -ldflags="-s -w" -o dist/probe-win64.exe ./cmd/probe
+          { echo "CGO_CFLAGS=$CGO_CFLAGS"; echo "LIBS=$LIBS"; } > build/go-build.log
+          set +e
+          go build -trimpath -ldflags="-s -w" -o dist/probe-win64.exe ./cmd/probe >> build/go-build.log 2>&1
+          rc=$?
+          set -e
+          cat build/go-build.log
+          if [ "$rc" -ne 0 ]; then bash scripts/annotate.sh "go build failed (rc=$rc)" build/go-build.log; exit "$rc"; fi
           ls -l dist
 
       - name: Win7 sanity (imported DLLs, no UCRT)
