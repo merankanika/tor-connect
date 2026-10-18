@@ -6,6 +6,7 @@
 package main
 
 /*
+#include <winsock2.h>
 #include <stdlib.h>
 #include "tor_api.h"
 
