@@ -71,6 +71,8 @@ do_openssl() {
   check "$DL/openssl.tgz" "$OPENSSL_SHA256"
   tar -C "$SRC" -xf "$DL/openssl.tgz"
   cd "$SRC/openssl-${OPENSSL_VERSION}"
+  # OpenSSL сам добавляет --cross-compile-prefix к CC/AR/..., поэтому полные имена из окружения убираем
+  unset CC AR RANLIB STRIP WINDRES RC
   ./Configure mingw64 no-shared no-tests no-docs no-apps no-module \
     --cross-compile-prefix="${HOST}-" --prefix="$PREFIX" --libdir=lib --openssldir="$PREFIX/ssl" \
     ${WINFLAGS}
