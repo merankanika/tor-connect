@@ -28,6 +28,9 @@ jobs:
           go-version: "1.20.14"
           cache: false
 
+      - name: Unit tests (pure Go)
+        run: go test ./internal/...
+
       - name: Install mingw-w64 (win32 threads, msvcrt)
         run: |
           sudo apt-get update

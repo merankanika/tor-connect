@@ -1,8 +1,10 @@
 // probe — пробная программа: запускает Tor, встроенный в этот же процесс (через tor_api.h).
 // Никаких дочерних процессов. Все аргументы командной строки передаются Tor как есть.
 //
-//	probe-win64.exe --version
+//	probe-win64.exe              (без аргументов: torrc.txt рядом с программой, создаётся при отсутствии)
+//	probe-win64.exe torrc.txt    (имя файла можно без -f)
 //	probe-win64.exe -f torrc.txt
+//	probe-win64.exe --version
 package main
 
 /*
@@ -29,8 +31,11 @@ import "C"
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"unsafe"
+
+	"github.com/merankanika/tor-connect/internal/cli"
 )
 
 func init() {
@@ -39,13 +44,21 @@ func init() {
 }
 
 func main() {
-	args := os.Args
-	if len(args) == 1 {
-		fmt.Fprintln(os.Stderr, "tor-connect probe: встроенный Tor в одном процессе")
-		fmt.Fprintln(os.Stderr, "использование: probe-win64.exe --version | -f torrc.txt")
-		args = append(args, "--version")
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "не удалось определить путь к программе:", err)
+		os.Exit(2)
+	}
+	res, err := cli.Resolve(os.Args, filepath.Dir(exe))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ошибка:", err)
+		os.Exit(2)
+	}
+	for _, n := range res.Notes {
+		fmt.Fprintln(os.Stderr, "tor-connect:", n)
 	}
 
+	args := res.Args
 	n := len(args)
 	size := C.size_t(uintptr(n+1) * unsafe.Sizeof(uintptr(0)))
 	argv := (**C.char)(C.malloc(size))
