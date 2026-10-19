@@ -5,7 +5,8 @@ on:
   push:
     branches: [main]
     paths:
-      - "scripts/**"
+      - "scripts/build-win-deps.sh"
+      - "scripts/versions.env"
       - "cmd/**"
       - "go.mod"
       - "internal/**"
