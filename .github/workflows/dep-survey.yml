@@ -15,4 +15,4 @@ jobs:
       - name: Survey Go directives of transport libraries
         run: |
           python3 scripts/dep-survey.py
-          python3 scripts/dep-survey2.py
+          python3 scripts/dep-survey3.py
