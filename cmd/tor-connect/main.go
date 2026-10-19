@@ -1,10 +1,11 @@
-// probe — пробная программа: запускает Tor, встроенный в этот же процесс (через tor_api.h).
+// tor-connect — Tor, встроенный в этот же процесс (через tor_api.h).
 // Никаких дочерних процессов. Все аргументы командной строки передаются Tor как есть.
 //
-//	probe-win64.exe              (без аргументов: torrc.txt рядом с программой, создаётся при отсутствии)
-//	probe-win64.exe torrc.txt    (имя файла можно без -f)
-//	probe-win64.exe -f torrc.txt
-//	probe-win64.exe --version
+//	tor-connect.exe              (без аргументов: torrc.txt рядом с программой, создаётся при отсутствии)
+//	tor-connect.exe torrc.txt    (имя файла можно без -f)
+//	tor-connect.exe -f torrc.txt
+//	tor-connect.exe --version
+//	tor-connect.exe -upstream direct -upstream socks5://user:pass@host:1080 -upstream http://host:8080
 package main
 
 /*
@@ -29,13 +30,17 @@ static int run_tor(int argc, char **argv) {
 import "C"
 
 import (
+	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"unsafe"
 
 	"github.com/merankanika/tor-connect/internal/cli"
+	"github.com/merankanika/tor-connect/internal/upstream"
 )
 
 func init() {
@@ -59,6 +64,28 @@ func main() {
 	}
 
 	args := res.Args
+	if len(res.Upstreams) > 0 {
+		specs, err := upstream.ParseSpecs(res.Upstreams)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "ошибка:", err)
+			os.Exit(2)
+		}
+		d := upstream.New(specs, upstream.Options{Logf: func(format string, a ...any) {
+			fmt.Fprintf(os.Stderr, "tor-connect: "+format+"\n", a...)
+		}})
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "ошибка: не удалось открыть локальный порт для вышестоящих прокси:", err)
+			os.Exit(2)
+		}
+		go func() { _ = upstream.Serve(context.Background(), ln, d) }()
+		names := make([]string, len(specs))
+		for i, s := range specs {
+			names[i] = s.String()
+		}
+		fmt.Fprintln(os.Stderr, "tor-connect: вышестоящие прокси по порядку:", strings.Join(names, ", "))
+		args = append(args, "--Socks5Proxy", ln.Addr().String())
+	}
 	n := len(args)
 	size := C.size_t(uintptr(n+1) * unsafe.Sizeof(uintptr(0)))
 	argv := (**C.char)(C.malloc(size))

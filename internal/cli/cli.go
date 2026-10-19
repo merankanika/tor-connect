@@ -44,6 +44,7 @@ Log notice stdout
 type Result struct {
 	Args      []string // полный argv для Tor, включая argv[0]
 	Notes     []string // сообщения пользователю
+	Upstreams []string // значения флага -upstream (вышестоящие прокси по порядку)
 	TorrcPath string   // путь к используемому torrc ("" в режиме --version/--help)
 }
 
@@ -69,6 +70,21 @@ func Resolve(args []string, exeDir string) (Result, error) {
 			return res, nil
 		}
 	}
+
+	// Собственный флаг: -upstream direct|socks5://[user:pass@]host:port|http://[user:pass@]host:port (повторяемый).
+	var filtered []string
+	for i := 0; i < len(rest); i++ {
+		if rest[i] == "-upstream" || rest[i] == "--upstream" {
+			if i+1 >= len(rest) {
+				return Result{}, fmt.Errorf("после %s не указан адрес прокси", rest[i])
+			}
+			res.Upstreams = append(res.Upstreams, rest[i+1])
+			i++
+			continue
+		}
+		filtered = append(filtered, rest[i])
+	}
+	rest = filtered
 
 	// 1. Определяем путь к torrc.
 	torrc := ""

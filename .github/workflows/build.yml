@@ -1,4 +1,4 @@
-name: probe-win7
+name: build-win
 
 on:
   workflow_dispatch:
@@ -8,7 +8,8 @@ on:
       - "scripts/**"
       - "cmd/**"
       - "go.mod"
-      - ".github/workflows/probe.yml"
+      - "internal/**"
+      - ".github/workflows/build.yml"
 
 permissions:
   contents: read
@@ -56,7 +57,7 @@ jobs:
           path: build
           key: deps-${{ hashFiles('scripts/versions.env', 'scripts/build-win-deps.sh') }}
 
-      - name: Build Go probe (cgo, single process)
+      - name: Build tor-connect (cgo, single process)
         env:
           CGO_ENABLED: "1"
           GOOS: windows
@@ -70,7 +71,7 @@ jobs:
           mkdir -p dist
           { echo "CGO_CFLAGS=$CGO_CFLAGS"; echo "LIBS=$LIBS"; } > build/go-build.log
           set +e
-          go build -trimpath -ldflags="-s -w" -o dist/probe-win64.exe ./cmd/probe >> build/go-build.log 2>&1
+          go build -trimpath -ldflags="-s -w" -o dist/tor-connect-win64.exe ./cmd/tor-connect >> build/go-build.log 2>&1
           rc=$?
           set -e
           cat build/go-build.log
@@ -79,33 +80,34 @@ jobs:
 
       - name: Win7 sanity (imported DLLs, no UCRT)
         run: |
-          x86_64-w64-mingw32-objdump -p dist/probe-win64.exe | grep "DLL Name" | sort -u | tee dist/imports.txt
+          x86_64-w64-mingw32-objdump -p dist/tor-connect-win64.exe | grep "DLL Name" | sort -u | tee dist/imports.txt
           if grep -Ei 'api-ms-win-crt|ucrtbase' dist/imports.txt; then echo "ОШИБКА: бинарник требует UCRT (не запустится на голой Win7)"; exit 1; fi
-          ( cd dist && sha256sum probe-win64.exe > SHA256SUMS && cat SHA256SUMS )
+          ( cd dist && sha256sum tor-connect-win64.exe > SHA256SUMS && cat SHA256SUMS )
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: probe-win64
+          name: tor-connect-win64
           path: dist/
           if-no-files-found: error
 
       - name: Publish build info
         run: |
           {
-            echo "size: $(stat -c %s dist/probe-win64.exe) bytes"
+            echo "size: $(stat -c %s dist/tor-connect-win64.exe) bytes"
             cat dist/SHA256SUMS
             echo "imported DLLs:"; cat dist/imports.txt
           } > build/info.txt
           body="$(cat build/info.txt)"
           body="${body//'%'/'%25'}"; body="${body//$'\n'/'%0A'}"
-          echo "::notice title=probe build info::${body}"
+          echo "::notice title=tor-connect build info::${body}"
 
-      - name: Publish pre-release (probe-latest)
+      - name: Publish pre-release (dev-latest)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete probe-latest --yes --cleanup-tag || true
-          gh release create probe-latest dist/probe-win64.exe dist/SHA256SUMS dist/imports.txt \
+          gh release delete dev-latest --yes --cleanup-tag || true
+          gh release create dev-latest dist/tor-connect-win64.exe dist/SHA256SUMS dist/imports.txt \
             --prerelease --target "$GITHUB_SHA" \
-            --title "probe (последняя сборка, Windows x64)" \
-            --notes "Пробная сборка: Tor ${TOR_VERSION:-0.4.9.x} внутри одного процесса. Только для проверки на Windows 7+. Коммит $GITHUB_SHA."
+            --title "tor-connect (последняя сборка, Windows x64)" \
+            --notes "Экспериментальная сборка: Tor внутри одного процесса, Windows 7+ x64. Коммит $GITHUB_SHA."

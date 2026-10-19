@@ -133,3 +133,22 @@ func TestMissingFileAfterFlag(t *testing.T) {
 		t.Fatal("ожидалась ошибка")
 	}
 }
+
+func TestUpstreamFlag(t *testing.T) {
+	dir := t.TempDir()
+	r, err := Resolve([]string{"x.exe", "-upstream", "direct", "--upstream", "socks5://u:p@h:1080", "-f", filepath.Join(dir, "t.txt")}, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Upstreams) != 2 || r.Upstreams[0] != "direct" || r.Upstreams[1] != "socks5://u:p@h:1080" {
+		t.Fatalf("upstreams: %v", r.Upstreams)
+	}
+	for _, a := range r.Args {
+		if a == "-upstream" || a == "--upstream" {
+			t.Fatalf("наш флаг не должен попадать в Tor: %v", r.Args)
+		}
+	}
+	if _, err := Resolve([]string{"x.exe", "-upstream"}, dir); err == nil {
+		t.Fatal("ожидалась ошибка без значения")
+	}
+}
