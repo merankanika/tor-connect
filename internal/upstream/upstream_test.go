@@ -253,3 +253,23 @@ func TestRouterEndToEnd(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestSetSpecsLive(t *testing.T) {
+	echo := echoServer(t)
+	d := New([]Spec{{Kind: "socks5", Addr: deadAddr(t)}}, Options{AttemptTimeout: time.Second})
+	if _, err := d.DialContext(context.Background(), "tcp", echo); err == nil {
+		t.Fatal("с мёртвым прокси подключения быть не должно")
+	}
+	d.SetSpecs([]Spec{{Kind: "direct"}})
+	c, err := d.DialContext(context.Background(), "tcp", echo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := roundtrip(t, c); got != "echo:hi" {
+		t.Fatal(got)
+	}
+	d.SetSpecs(nil)
+	if sp := d.Specs(); len(sp) != 1 || sp[0].Kind != "direct" {
+		t.Fatalf("пустой список должен давать direct: %+v", sp)
+	}
+}

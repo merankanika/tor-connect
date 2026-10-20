@@ -1,0 +1,30 @@
+/* Ресурсы exe. Компилируется windres из корня репозитория (пути указаны от корня). */
+#include <winver.h>
+
+1 ICON "assets/tor-connect.ico"
+1 24 "cmd/tor-connect/tor-connect.manifest"
+
+1 VERSIONINFO
+FILEVERSION 0,1,0,0
+PRODUCTVERSION 0,1,0,0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "FileDescription", "tor-connect: Tor in a single executable"
+      VALUE "ProductName", "tor-connect"
+      VALUE "FileVersion", "0.1.0.0"
+      VALUE "ProductVersion", "0.1.0.0"
+      VALUE "OriginalFilename", "tor-connect.exe"
+      VALUE "InternalName", "tor-connect"
+      VALUE "Comments", "https://github.com/merankanika/tor-connect"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x0409, 1200
+  END
+END

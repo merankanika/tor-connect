@@ -101,6 +101,7 @@ type Dialer struct {
 	opt   Options
 
 	mu       sync.Mutex
+	gen      int // версия списка: растёт при SetSpecs
 	last     int // индекс последнего успешного варианта, -1 если нет
 	failedAt []time.Time
 }
@@ -126,12 +127,13 @@ func New(specs []Spec, opt Options) *Dialer {
 	return &Dialer{specs: specs, opt: opt, last: -1, failedAt: make([]time.Time, len(specs))}
 }
 
-// order: сначала последний удачный, затем остальные по порядку конфигурации;
-// недавно сбойные — в конец.
-func (d *Dialer) order() []int {
+// snapshot возвращает копию списка вариантов и порядок их перебора: сначала последний удачный,
+// затем остальные по порядку конфигурации; недавно сбойные — в конец.
+func (d *Dialer) snapshot() (gen int, specs []Spec, order []int) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	now := time.Now()
+	specs = append([]Spec(nil), d.specs...)
 	var good, bad []int
 	add := func(i int) {
 		if !d.failedAt[i].IsZero() && now.Sub(d.failedAt[i]) < d.opt.Cooldown {
@@ -148,7 +150,28 @@ func (d *Dialer) order() []int {
 			add(i)
 		}
 	}
-	return append(good, bad...)
+	return d.gen, specs, append(good, bad...)
+}
+
+// SetSpecs заменяет список вариантов выхода «на лету» (пустой список означает только прямое подключение).
+// Уже установленные соединения не затрагиваются.
+func (d *Dialer) SetSpecs(specs []Spec) {
+	if len(specs) == 0 {
+		specs = []Spec{{Kind: "direct"}}
+	}
+	d.mu.Lock()
+	d.specs = append([]Spec(nil), specs...)
+	d.gen++
+	d.last = -1
+	d.failedAt = make([]time.Time, len(d.specs))
+	d.mu.Unlock()
+}
+
+// Specs возвращает текущий список вариантов.
+func (d *Dialer) Specs() []Spec {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]Spec(nil), d.specs...)
 }
 
 // DialContext подключается к addr, перебирая варианты выхода.
@@ -156,28 +179,33 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 	if !strings.HasPrefix(network, "tcp") {
 		return nil, fmt.Errorf("upstream: сеть %q не поддерживается", network)
 	}
+	gen, specs, order := d.snapshot()
 	var errs []error
-	for _, i := range d.order() {
+	for _, i := range order {
 		if err := ctx.Err(); err != nil {
 			errs = append(errs, err)
 			break
 		}
-		c, err := d.dialOne(ctx, d.specs[i], network, addr)
+		c, err := d.dialOne(ctx, specs[i], network, addr)
 		if err == nil {
 			d.mu.Lock()
-			if d.last != i {
-				d.opt.Logf("upstream: выход через %s", d.specs[i])
+			if d.gen == gen {
+				if d.last != i {
+					d.opt.Logf("upstream: выход через %s", specs[i])
+				}
+				d.last = i
+				d.failedAt[i] = time.Time{}
 			}
-			d.last = i
-			d.failedAt[i] = time.Time{}
 			d.mu.Unlock()
 			return c, nil
 		}
 		d.mu.Lock()
-		d.failedAt[i] = time.Now()
+		if d.gen == gen {
+			d.failedAt[i] = time.Now()
+		}
 		d.mu.Unlock()
-		d.opt.Logf("upstream: %s не сработал для %s: %v", d.specs[i], addr, err)
-		errs = append(errs, fmt.Errorf("%s: %w", d.specs[i], err))
+		d.opt.Logf("upstream: %s не сработал для %s: %v", specs[i], addr, err)
+		errs = append(errs, fmt.Errorf("%s: %w", specs[i], err))
 	}
 	return nil, fmt.Errorf("upstream: ни один вариант выхода не сработал для %s: %w", addr, errors.Join(errs...))
 }

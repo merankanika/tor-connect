@@ -10,6 +10,8 @@ on:
       - "cmd/**"
       - "go.mod"
       - "internal/**"
+      - "assets/**"
+      - "README.md"
       - ".github/workflows/build.yml"
 
 permissions:
@@ -58,6 +60,11 @@ jobs:
           path: build
           key: deps-${{ hashFiles('scripts/versions.env', 'scripts/build-win-deps.sh') }}
 
+      - name: Compile Windows resources (icon, manifest, version info)
+        run: |
+          x86_64-w64-mingw32-windres -O coff -i cmd/tor-connect/tor-connect.rc -o cmd/tor-connect/resource_windows_amd64.syso
+          ls -l cmd/tor-connect/*.syso
+
       - name: Build tor-connect (cgo, single process)
         env:
           CGO_ENABLED: "1"
@@ -96,6 +103,7 @@ jobs:
           {
             echo "size: $(stat -c %s dist/tor-connect-win64.exe) bytes"
             cat dist/SHA256SUMS
+            echo "resource section (.rsrc) present: $(x86_64-w64-mingw32-objdump -h dist/tor-connect-win64.exe | grep -c '\.rsrc')"
             echo "imported DLLs:"; cat dist/imports.txt
           } > build/info.txt
           body="$(cat build/info.txt)"

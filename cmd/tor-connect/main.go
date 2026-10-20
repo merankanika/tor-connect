@@ -1,11 +1,10 @@
 // tor-connect — Tor, встроенный в этот же процесс (через tor_api.h).
 // Никаких дочерних процессов. Все аргументы командной строки передаются Tor как есть.
 //
-//	tor-connect.exe              (без аргументов: torrc.txt рядом с программой, создаётся при отсутствии)
-//	tor-connect.exe torrc.txt    (имя файла можно без -f)
-//	tor-connect.exe -f torrc.txt
+//	tor-connect.exe                 (файл настроек tecon.cfg / tecon ищется и создаётся автоматически)
+//	tor-connect.exe -f мой.cfg      (явный файл настроек; имя можно и без -f)
+//	tor-connect.exe -upstream direct -upstream socks5://user:pass@host:1080
 //	tor-connect.exe --version
-//	tor-connect.exe -upstream direct -upstream socks5://user:pass@host:1080 -upstream http://host:8080
 package main
 
 /*
@@ -32,15 +31,14 @@ import "C"
 import (
 	"context"
 	"fmt"
-	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
-	"strings"
+	"time"
 	"unsafe"
 
-	"github.com/merankanika/tor-connect/internal/cli"
-	"github.com/merankanika/tor-connect/internal/upstream"
+	"github.com/merankanika/tor-connect/internal/app"
 )
 
 func init() {
@@ -48,44 +46,8 @@ func init() {
 	runtime.LockOSThread()
 }
 
-func main() {
-	exe, err := os.Executable()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "не удалось определить путь к программе:", err)
-		os.Exit(2)
-	}
-	res, err := cli.Resolve(os.Args, filepath.Dir(exe))
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "ошибка:", err)
-		os.Exit(2)
-	}
-	for _, n := range res.Notes {
-		fmt.Fprintln(os.Stderr, "tor-connect:", n)
-	}
-
-	args := res.Args
-	if len(res.Upstreams) > 0 {
-		specs, err := upstream.ParseSpecs(res.Upstreams)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "ошибка:", err)
-			os.Exit(2)
-		}
-		d := upstream.New(specs, upstream.Options{Logf: func(format string, a ...any) {
-			fmt.Fprintf(os.Stderr, "tor-connect: "+format+"\n", a...)
-		}})
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "ошибка: не удалось открыть локальный порт для вышестоящих прокси:", err)
-			os.Exit(2)
-		}
-		go func() { _ = upstream.Serve(context.Background(), ln, d) }()
-		names := make([]string, len(specs))
-		for i, s := range specs {
-			names[i] = s.String()
-		}
-		fmt.Fprintln(os.Stderr, "tor-connect: вышестоящие прокси по порядку:", strings.Join(names, ", "))
-		args = append(args, "--Socks5Proxy", ln.Addr().String())
-	}
+// runTor запускает Tor в этом же процессе и возвращает код завершения.
+func runTor(args []string) int {
 	n := len(args)
 	size := C.size_t(uintptr(n+1) * unsafe.Sizeof(uintptr(0)))
 	argv := (**C.char)(C.malloc(size))
@@ -94,7 +56,69 @@ func main() {
 		items[i] = C.CString(a)
 	}
 	items[n] = nil
+	return int(C.run_tor(C.int(n), argv))
+}
 
-	rc := C.run_tor(C.int(n), argv)
-	os.Exit(int(rc))
+func main() {
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "не удалось определить путь к программе:", err)
+		os.Exit(2)
+	}
+	exeDir := filepath.Dir(exe)
+	cwd, _ := os.Getwd()
+
+	opts, err := app.ParseArgs(os.Args[1:])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ошибка:", err)
+		os.Exit(2)
+	}
+	if opts.Passthrough {
+		os.Exit(runTor(append([]string{os.Args[0]}, opts.TorArgs...)))
+	}
+
+	logf := func(format string, a ...any) {
+		fmt.Fprintf(os.Stderr, "tor-connect: "+format+"\n", a...)
+	}
+	sess, err := app.Prepare(opts, exeDir, cwd, logf)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ошибка:", err)
+		os.Exit(2)
+	}
+	for _, n := range sess.Notes {
+		logf("%s", n)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		if err := sess.StartControl(ctx, 90*time.Second); err != nil {
+			if ctx.Err() == nil {
+				logf("%v; изменения настроек на лету применяться не будут", err)
+			}
+			return
+		}
+		logf("слежу за файлом настроек, изменения применяются на лету")
+		sess.Watch(ctx)
+	}()
+
+	sig := make(chan os.Signal, 2)
+	signal.Notify(sig, os.Interrupt)
+	go func() {
+		<-sig
+		logf("завершаю работу (повторное нажатие Ctrl+C завершит принудительно)")
+		if !sess.Shutdown() {
+			os.Exit(130)
+		}
+		select {
+		case <-sig:
+			os.Exit(130)
+		case <-time.After(15 * time.Second):
+			os.Exit(1)
+		}
+	}()
+
+	rc := runTor(append([]string{os.Args[0]}, sess.TorArgs...))
+	cancel()
+	sess.Close()
+	os.Exit(rc)
 }

@@ -7,3 +7,7 @@ torrc.local
 bridges.local*
 *.key
 *.pem
+
+*.syso
+/tecon.cfg
+/tecon
