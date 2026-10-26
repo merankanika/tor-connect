@@ -149,3 +149,26 @@ func TestReadPortFile(t *testing.T) {
 		t.Fatal("ожидалась ошибка")
 	}
 }
+
+func TestSetConfPairsAndReset(t *testing.T) {
+	f := newFakeTor(t, "aa")
+	c, _ := Dial(f.ln.Addr().String(), time.Second)
+	defer c.Close()
+	if err := c.AuthenticateCookie([]byte{0xaa}); err != nil {
+		t.Fatal(err)
+	}
+	err := c.SetConfPairs([]Pair{{"HiddenServiceDir", "D:/hs/a"}, {"HiddenServicePort", "22 127.0.0.1:22"}, {"HiddenServiceDir", "D:/hs/b"}, {"HiddenServicePort", "80 127.0.0.1:8080"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `SETCONF HiddenServiceDir="D:/hs/a" HiddenServicePort="22 127.0.0.1:22" HiddenServiceDir="D:/hs/b" HiddenServicePort="80 127.0.0.1:8080"`
+	if got := f.last(); got != want {
+		t.Fatalf("порядок пар должен сохраняться:\n%q\n%q", got, want)
+	}
+	if err := c.ResetConf("HiddenServiceDir", "HiddenServicePort"); err != nil || f.last() != "SETCONF HiddenServiceDir HiddenServicePort" {
+		t.Fatalf("%v %q", err, f.last())
+	}
+	if c.SetConfPairs(nil) == nil || c.ResetConf() == nil {
+		t.Fatal("пустые списки должны давать ошибку")
+	}
+}

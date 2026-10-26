@@ -122,6 +122,35 @@ func (c *Client) SetConf(name string, values ...string) error {
 	return err
 }
 
+// Pair — пара «имя=значение» для SETCONF (порядок пар сохраняется).
+type Pair struct {
+	Name  string
+	Value string
+}
+
+// SetConfPairs устанавливает несколько опций одной командой с сохранением порядка.
+// Нужен для опций, зависящих от порядка (HiddenServiceDir, затем его HiddenServicePort и т.д.).
+func (c *Client) SetConfPairs(pairs []Pair) error {
+	if len(pairs) == 0 {
+		return errors.New("tcontrol: пустой список опций")
+	}
+	cmd := "SETCONF"
+	for _, p := range pairs {
+		cmd += " " + p.Name + "=" + Quote(p.Value)
+	}
+	_, err := c.Cmd(cmd)
+	return err
+}
+
+// ResetConf сбрасывает перечисленные опции к значениям по умолчанию одной командой.
+func (c *Client) ResetConf(names ...string) error {
+	if len(names) == 0 {
+		return errors.New("tcontrol: пустой список опций")
+	}
+	_, err := c.Cmd("SETCONF " + strings.Join(names, " "))
+	return err
+}
+
 // GetInfo возвращает значение ключа GETINFO.
 func (c *Client) GetInfo(key string) (string, error) {
 	lines, err := c.Cmd("GETINFO " + key)

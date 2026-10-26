@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/merankanika/tor-connect/internal/portmap"
 	"github.com/merankanika/tor-connect/internal/upstream"
 )
 
@@ -32,8 +33,9 @@ type Directive struct {
 
 // Config — разобранный файл.
 type Config struct {
-	Upstreams []string    // значения директив Upstream по порядку
-	Tor       []Directive // всё остальное — для Tor
+	Upstreams []string       // значения директив Upstream по порядку
+	Maps      []portmap.Rule // MapPort и MapPortUDP
+	Tor       []Directive    // всё остальное — для Tor
 	Warnings  []string
 }
 
@@ -43,8 +45,53 @@ var replacedByUpstream = map[string]bool{
 	"httpsproxy": true, "httpsproxyauthenticator": true,
 }
 
-// Parse разбирает текст настроек.
-func Parse(text string) (*Config, error) {
+// pathDirectives — директивы Tor со значением-путём: относительные пути считаются от папки файла настроек.
+var pathDirectives = map[string]bool{
+	"datadirectory": true, "hiddenservicedir": true, "clientonionauthdir": true,
+	"geoipfile": true, "geoipv6file": true,
+}
+
+// UnquoteValue снимает с значения кавычки в стиле torrc (с обработкой \\, \", \n, \r, \t).
+func UnquoteValue(v string) string {
+	if len(v) < 2 || v[0] != '"' || v[len(v)-1] != '"' {
+		return v
+	}
+	in := v[1 : len(v)-1]
+	var b strings.Builder
+	for i := 0; i < len(in); i++ {
+		if in[i] == '\\' && i+1 < len(in) {
+			i++
+			switch in[i] {
+			case 'n':
+				b.WriteByte('\n')
+			case 'r':
+				b.WriteByte('\r')
+			case 't':
+				b.WriteByte('\t')
+			default:
+				b.WriteByte(in[i])
+			}
+			continue
+		}
+		b.WriteByte(in[i])
+	}
+	return b.String()
+}
+
+func resolvePath(value, baseDir string) string {
+	v := UnquoteValue(value)
+	if v == "" || filepath.IsAbs(v) || strings.HasPrefix(v, "/") || strings.HasPrefix(v, "\\") {
+		return value
+	}
+	return `"` + filepath.ToSlash(filepath.Join(baseDir, v)) + `"`
+}
+
+// Parse разбирает текст настроек (относительные пути не пересчитываются).
+func Parse(text string) (*Config, error) { return ParseBase(text, "") }
+
+// ParseBase разбирает текст настроек; если baseDir не пуст, относительные пути (DataDirectory, HiddenServiceDir и др.)
+// считаются от этой папки (обычно это папка файла настроек).
+func ParseBase(text, baseDir string) (*Config, error) {
 	text = strings.TrimPrefix(text, "\ufeff")
 	sc := bufio.NewScanner(strings.NewReader(text))
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
@@ -67,9 +114,22 @@ func Parse(text string) (*Config, error) {
 				return nil, fmt.Errorf("строка %d: Upstream: %w", n, err)
 			}
 			cfg.Upstreams = append(cfg.Upstreams, value)
+		case key == "mapport" || key == "mapportudp":
+			proto := "tcp"
+			if key == "mapportudp" {
+				proto = "udp"
+			}
+			r, err := portmap.ParseRule(proto, value)
+			if err != nil {
+				return nil, fmt.Errorf("строка %d: %s: %w", n, name, err)
+			}
+			cfg.Maps = append(cfg.Maps, r)
 		case replacedByUpstream[key]:
 			cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("строка %d: %s игнорируется (используйте Upstream)", n, name))
 		default:
+			if baseDir != "" && pathDirectives[key] && value != "" {
+				value = resolvePath(value, baseDir)
+			}
 			cfg.Tor = append(cfg.Tor, Directive{Name: name, Value: value, Line: n})
 		}
 	}
@@ -115,10 +175,10 @@ func (c *Config) Value(name string) (string, bool) {
 	return val, ok
 }
 
-// TorText возвращает строки для Tor в виде torrc.
-func (c *Config) TorText() string {
+// Text возвращает директивы в виде torrc.
+func Text(ds []Directive) string {
 	var b strings.Builder
-	for _, d := range c.Tor {
+	for _, d := range ds {
 		b.WriteString(d.Name)
 		if d.Value != "" {
 			b.WriteByte(' ')
@@ -129,13 +189,26 @@ func (c *Config) TorText() string {
 	return b.String()
 }
 
+// TorText возвращает строки для Tor в виде torrc.
+func (c *Config) TorText() string { return Text(c.Tor) }
+
 // Change — изменившаяся директива Tor (Name записано так, как в файле; Key — в нижнем регистре).
 type Change struct {
 	Name string
 	Key  string
 	Old  []string
 	New  []string
+
+	// Group: изменилась семья директив HiddenService*, зависящих от порядка. Tor нужно передать их все сразу.
+	Group      bool
+	Pairs      []NameValue // новый набор в порядке файла (пусто — службы убраны)
+	ResetNames []string    // имена директив семьи в прежних настройках (для сброса)
 }
+
+// NameValue — директива «имя значение».
+type NameValue struct{ Name, Value string }
+
+const hiddenServicePrefix = "hiddenservice"
 
 type grouped struct {
 	order []string
@@ -188,7 +261,36 @@ func DiffTor(oldC, newC []Directive) []Change {
 		}
 		out = append(out, Change{Name: name, Key: k, Old: o.vals[k], New: n.vals[k]})
 	}
-	return out
+
+	// Директивы HiddenService* связаны порядком (HiddenServiceDir, затем его HiddenServicePort и т.д.):
+	// при любом изменении передаём Tor всю семью одной командой.
+	var plain []Change
+	hsChanged := false
+	for _, c := range out {
+		if strings.HasPrefix(c.Key, hiddenServicePrefix) {
+			hsChanged = true
+		} else {
+			plain = append(plain, c)
+		}
+	}
+	if hsChanged {
+		g := Change{Name: "HiddenService*", Key: "hiddenservice*", Group: true}
+		for _, d := range newC {
+			if strings.HasPrefix(strings.ToLower(d.Name), hiddenServicePrefix) {
+				g.Pairs = append(g.Pairs, NameValue{d.Name, d.Value})
+			}
+		}
+		seenName := map[string]bool{}
+		for _, d := range oldC {
+			k := strings.ToLower(d.Name)
+			if strings.HasPrefix(k, hiddenServicePrefix) && !seenName[k] {
+				seenName[k] = true
+				g.ResetNames = append(g.ResetNames, d.Name)
+			}
+		}
+		plain = append(plain, g)
+	}
+	return plain
 }
 
 func isFile(p string) bool {

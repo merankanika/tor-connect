@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"context"
 	"encoding/hex"
+	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -274,3 +276,212 @@ func TestStartControlTimeout(t *testing.T) {
 		t.Fatal("ожидалась ошибка таймаута")
 	}
 }
+
+// ---- занятые порты, onion-службы, проброс портов ----
+
+func freeAddr(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := l.Addr().String()
+	l.Close()
+	return a
+}
+
+func prepareLog(t *testing.T, cfg string) (*Session, func() []string, string) {
+	t.Helper()
+	exe := t.TempDir()
+	if err := os.WriteFile(filepath.Join(exe, "tecon.cfg"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var logs []string
+	s, err := Prepare(Options{}, exe, exe, func(f string, a ...any) {
+		mu.Lock()
+		logs = append(logs, fmtSprintf(f, a...))
+		mu.Unlock()
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	return s, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), logs...)
+	}, exe
+}
+
+func TestBusyListenerPortsAreSkipped(t *testing.T) {
+	busyTCP, _ := net.Listen("tcp", "127.0.0.1:0")
+	defer busyTCP.Close()
+	busyUDP, _ := net.ListenPacket("udp", "127.0.0.1:0")
+	defer busyUDP.Close()
+	good := freeAddr(t)
+	cfg := "SocksPort " + busyTCP.Addr().String() + "\nSocksPort " + good + " IsolateClientAddr\nDNSPort " + busyUDP.LocalAddr().String() + "\nHTTPTunnelPort auto\nSocksPort auto\n"
+	s, _, _ := prepareLog(t, cfg)
+	b, _ := os.ReadFile(s.TorrcPath)
+	txt := string(b)
+	if strings.Contains(txt, busyTCP.Addr().String()) || strings.Contains(txt, busyUDP.LocalAddr().String()) {
+		t.Fatalf("занятые порты не должны попадать в torrc:\n%s", txt)
+	}
+	for _, want := range []string{"SocksPort " + good, "HTTPTunnelPort auto", "SocksPort auto", "SocksPort " + s.torSocks} {
+		if !strings.Contains(txt, want) {
+			t.Fatalf("в torrc нет %q:\n%s", want, txt)
+		}
+	}
+	warns := 0
+	for _, n := range s.Notes {
+		if strings.Contains(n, "порт занят") {
+			warns++
+		}
+	}
+	if warns != 2 {
+		t.Fatalf("ожидалось 2 предупреждения о занятых портах: %v", s.Notes)
+	}
+}
+
+func TestRetryPortWhenItBecomesFree(t *testing.T) {
+	busy, _ := net.Listen("tcp", "127.0.0.1:0")
+	addr := busy.Addr().String()
+	s, _, _ := prepareLog(t, "SocksPort "+addr+"\n")
+	cookie := []byte{7}
+	f := startFakeTor(t, cookie, "")
+	connect(t, s, f, cookie)
+	if !s.pending {
+		t.Fatal("пропущенный порт должен помечать сеанс как ожидающий")
+	}
+	s.Refresh()
+	if strings.Contains(strings.Join(f.commands(), "\n"), "SETCONF SocksPort") {
+		t.Fatal("порт ещё занят, команды быть не должно")
+	}
+	busy.Close()
+	s.Refresh()
+	if !strings.Contains(strings.Join(f.commands(), "\n"), `SETCONF SocksPort="`+addr+`"`) {
+		t.Fatalf("после освобождения порт должен быть передан Tor: %v", f.commands())
+	}
+	if s.pending {
+		t.Fatal("после успешного применения ожидающих портов не остаётся")
+	}
+}
+
+func TestHiddenServicesGroupedReload(t *testing.T) {
+	s, _, exe := prepareLog(t, "Log notice stdout\n")
+	cookie := []byte{5}
+	f := startFakeTor(t, cookie, "")
+	connect(t, s, f, cookie)
+
+	spaced := filepath.ToSlash(filepath.Join(t.TempDir(), "my dir", "hs"))
+	rewrite(t, s, "Log notice stdout\nHiddenServiceDir hs/main\nHiddenServiceVersion 3\nHiddenServicePort 21\nHiddenServicePort 22 127.0.0.1:22\nHiddenServicePort 80 127.0.0.1:8080\nHiddenServiceDir \""+spaced+"\"\nHiddenServicePort 3389 127.0.0.1:1805\n")
+	want := `SETCONF HiddenServiceDir="` + filepath.ToSlash(filepath.Join(exe, "hs", "main")) + `" HiddenServiceVersion="3" HiddenServicePort="21" HiddenServicePort="22 127.0.0.1:22" HiddenServicePort="80 127.0.0.1:8080" HiddenServiceDir="` + spaced + `" HiddenServicePort="3389 127.0.0.1:1805"`
+	cmds := f.commands()
+	if got := cmds[len(cmds)-1]; got != want {
+		t.Fatalf("семья HiddenService* должна уходить одной командой в порядке файла:\n%s\n%s", got, want)
+	}
+	n := 0
+	for _, c := range cmds {
+		if strings.HasPrefix(c, "SETCONF HiddenService") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("ожидалась одна команда, а не %d", n)
+	}
+	rewrite(t, s, "Log notice stdout\n")
+	cmds = f.commands()
+	if got := cmds[len(cmds)-1]; got != "SETCONF HiddenServiceDir HiddenServiceVersion HiddenServicePort" {
+		t.Fatalf("сброс служб: %q", got)
+	}
+}
+
+func TestOnionServicesAndAnnounce(t *testing.T) {
+	dir := filepath.ToSlash(t.TempDir())
+	s, getLogs, _ := prepareLog(t, "HiddenServiceDir \""+dir+"\"\nHiddenServicePort 22 127.0.0.1:22\nHiddenServicePort 80\n")
+	svcs := OnionServices(s.effTor)
+	if len(svcs) != 1 || svcs[0].Dir != dir || strings.Join(svcs[0].Ports, ",") != "22,80" {
+		t.Fatalf("%+v", svcs)
+	}
+	os.WriteFile(filepath.Join(dir, "hostname"), []byte("abcdefghijklmnop.onion\n"), 0o600)
+	s.AnnounceOnions()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, l := range getLogs() {
+			if strings.Contains(l, "abcdefghijklmnop.onion") && strings.Contains(l, "22, 80") {
+				return
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("адрес onion-службы не объявлен: %v", getLogs())
+}
+
+func echoServer(t *testing.T) string {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				line, _ := bufio.NewReader(c).ReadString('\n')
+				io.WriteString(c, "echo:"+line)
+			}()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+func askTCP(t *testing.T, addr string) string {
+	t.Helper()
+	c, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		return "ошибка: " + err.Error()
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(3 * time.Second))
+	io.WriteString(c, "hi\n")
+	l, _ := bufio.NewReader(c).ReadString('\n')
+	return strings.TrimSpace(l)
+}
+
+func TestMapPortLifecycle(t *testing.T) {
+	echo := echoServer(t)
+	listen := freeAddr(t)
+	busy, _ := net.Listen("tcp", "127.0.0.1:0")
+	defer busy.Close()
+	cfg := "MapPort " + listen + " to " + echo + "\nMapPort " + busy.Addr().String() + " to " + echo + "\n"
+	s, _, _ := prepareLog(t, cfg)
+	if got := askTCP(t, listen); got != "echo:hi" {
+		t.Fatalf("проброс не работает: %q", got)
+	}
+	found := false
+	for _, n := range s.Notes {
+		if strings.Contains(n, "работает 1, пропущено 1") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("итог проброса в сообщениях запуска: %v", s.Notes)
+	}
+	cookie := []byte{3}
+	f := startFakeTor(t, cookie, "")
+	connect(t, s, f, cookie)
+	rewrite(t, s, "Log notice stdout\n") // правила убраны
+	time.Sleep(150 * time.Millisecond)
+	if got := askTCP(t, listen); !strings.HasPrefix(got, "ошибка") {
+		t.Fatalf("после удаления правила порт должен закрыться: %q", got)
+	}
+	if strings.Contains(strings.Join(f.commands(), "\n"), "MapPort") {
+		t.Fatal("MapPort — директива tor-connect, Tor её получать не должен")
+	}
+}
+
+func fmtSprintf(f string, a ...any) string { return fmt.Sprintf(f, a...) }

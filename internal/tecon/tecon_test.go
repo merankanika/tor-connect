@@ -187,3 +187,82 @@ func TestReadmeExampleMatchesDefault(t *testing.T) {
 		t.Fatal("пример tecon.cfg в README расходится с internal/tecon/default.cfg")
 	}
 }
+
+func TestMapPortParsing(t *testing.T) {
+	cfg, err := Parse("MapPort 127.0.0.1:122 to 155.33.11.22:22 # внешний\nMapPort 127.0.0.1:555 to 125\nMapPort 143 to 144.33.44.17:1146\nMapPortUDP 143 to 144.33.44.17:1146\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Maps) != 4 || cfg.Maps[0].Via != "tor" || cfg.Maps[1].Via != "direct" || cfg.Maps[2].Listen != "0.0.0.0:143" || cfg.Maps[3].Proto != "udp" {
+		t.Fatalf("%+v", cfg.Maps)
+	}
+	if len(cfg.Tor) != 0 {
+		t.Fatal("MapPort не должен попадать в настройки Tor")
+	}
+	if _, err := Parse("Log notice stdout\nMapPortUDP 1 to 2.3.4.5:6 via tor\n"); err == nil || !strings.Contains(err.Error(), "строка 2") {
+		t.Fatalf("ожидалась ошибка со строкой 2: %v", err)
+	}
+}
+
+func TestRelativePathsResolvedFromConfigDir(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "my dir")
+	cfg, err := ParseBase("DataDirectory data\nHiddenServiceDir hs/main\nGeoIPFile \"geo/geoip\"\nHiddenServiceDir "+filepath.ToSlash(filepath.Join(base, "abs"))+"\nLog notice file rel.log\n", base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := func(rel string) string { return `"` + filepath.ToSlash(filepath.Join(base, rel)) + `"` }
+	if cfg.Tor[0].Value != want("data") || cfg.Tor[1].Value != want("hs/main") || cfg.Tor[2].Value != want("geo/geoip") {
+		t.Fatalf("%+v", cfg.Tor)
+	}
+	if UnquoteValue(cfg.Tor[3].Value) != filepath.ToSlash(filepath.Join(base, "abs")) || strings.HasPrefix(cfg.Tor[3].Value, `"`) {
+		t.Fatalf("абсолютный путь менять нельзя: %q", cfg.Tor[3].Value)
+	}
+	if cfg.Tor[4].Value != "notice file rel.log" {
+		t.Fatal("Log не относится к путевым директивам")
+	}
+	if v, _ := cfg.Value("DataDirectory"); v != filepath.ToSlash(filepath.Join(base, "data")) {
+		t.Fatalf("Value: %q", v)
+	}
+}
+
+func TestUnquoteValue(t *testing.T) {
+	cases := map[string]string{
+		`plain`:         "plain",
+		`"quoted path"`: "quoted path",
+		`"a\\b\"c"`:     `a\b"c`,
+		`"x\ny"`:        "x\ny",
+		`"`:             `"`,
+		`""`:            "",
+		`"unterminated`: `"unterminated`,
+	}
+	for in, want := range cases {
+		if got := UnquoteValue(in); got != want {
+			t.Errorf("%q: %q != %q", in, got, want)
+		}
+	}
+}
+
+func TestHiddenServiceGroupDiff(t *testing.T) {
+	a, _ := Parse("SocksPort 9050\nHiddenServiceDir D:/hs/a\nHiddenServicePort 22 127.0.0.1:22\n")
+	b, _ := Parse("SocksPort 9050\nHiddenServiceDir D:/hs/a\nHiddenServicePort 22 127.0.0.1:22\nHiddenServicePort 80 127.0.0.1:8080\nHiddenServiceVersion 3\n")
+	ch := DiffTor(a.Tor, b.Tor)
+	if len(ch) != 1 || !ch[0].Group {
+		t.Fatalf("ожидалось одно групповое изменение: %+v", ch)
+	}
+	g := ch[0]
+	if len(g.Pairs) != 4 || g.Pairs[0].Name != "HiddenServiceDir" || g.Pairs[1].Value != "22 127.0.0.1:22" || g.Pairs[2].Value != "80 127.0.0.1:8080" || g.Pairs[3].Name != "HiddenServiceVersion" {
+		t.Fatalf("порядок пар: %+v", g.Pairs)
+	}
+	// удаление всех служб
+	c, _ := Parse("SocksPort 9050\n")
+	ch = DiffTor(a.Tor, c.Tor)
+	if len(ch) != 1 || !ch[0].Group || len(ch[0].Pairs) != 0 || len(ch[0].ResetNames) != 2 {
+		t.Fatalf("удаление: %+v", ch)
+	}
+	// изменение обычной директивы вместе с группой
+	d, _ := Parse("SocksPort 9051\nHiddenServiceDir D:/hs/a\nHiddenServicePort 22 127.0.0.1:22\n")
+	ch = DiffTor(a.Tor, d.Tor)
+	if len(ch) != 1 || ch[0].Group || ch[0].Key != "socksport" {
+		t.Fatalf("группа не менялась: %+v", ch)
+	}
+}

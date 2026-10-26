@@ -98,6 +98,7 @@ func main() {
 			return
 		}
 		logf("слежу за файлом настроек, изменения применяются на лету")
+		sess.AnnounceOnions()
 		sess.Watch(ctx)
 	}()
 
