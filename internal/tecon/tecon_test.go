@@ -266,3 +266,30 @@ func TestHiddenServiceGroupDiff(t *testing.T) {
 		t.Fatalf("группа не менялась: %+v", ch)
 	}
 }
+
+func TestOrphanHiddenServiceDirectivesAreSkipped(t *testing.T) {
+	cfg, err := Parse("HiddenServicePort 80 127.0.0.1:80\nSocksPort 9050\nHiddenServiceVersion 3\nHiddenServiceDir hs/a\nHiddenServicePort 81\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Warnings) != 2 || !strings.Contains(cfg.Warnings[0], "строка 1") || !strings.Contains(cfg.Warnings[1], "строка 3") {
+		t.Fatalf("предупреждения: %v", cfg.Warnings)
+	}
+	var names []string
+	for _, d := range cfg.Tor {
+		names = append(names, d.Name)
+	}
+	if strings.Join(names, ",") != "SocksPort,HiddenServiceDir,HiddenServicePort" {
+		t.Fatalf("Tor должен получить только корректные строки: %v", names)
+	}
+}
+
+func TestQuotePathWindows(t *testing.T) {
+	got := QuotePath(`D:\0\1\my dir\data`)
+	if got != `"D:\\0\\1\\my dir\\data"` {
+		t.Fatalf("%s", got)
+	}
+	if UnquoteValue(got) != `D:\0\1\my dir\data` {
+		t.Fatal("кавычки должны сниматься без потерь")
+	}
+}

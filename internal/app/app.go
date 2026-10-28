@@ -115,7 +115,7 @@ type fileStat struct {
 	size int64
 }
 
-func q(p string) string { return `"` + filepath.ToSlash(p) + `"` }
+func q(p string) string { return tecon.QuotePath(p) }
 
 // ---- проверка занятых портов ----
 

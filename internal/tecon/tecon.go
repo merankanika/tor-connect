@@ -78,12 +78,18 @@ func UnquoteValue(v string) string {
 	return b.String()
 }
 
+// QuotePath оформляет путь для torrc в кавычках, удваивая обратные косые черты. Tor на Windows считает
+// абсолютными только пути вида «D:\\…» (с обратной косой чертой), «D:/…» он считает относительными и ворчит.
+func QuotePath(p string) string {
+	return `"` + strings.ReplaceAll(p, `\`, `\\`) + `"`
+}
+
 func resolvePath(value, baseDir string) string {
 	v := UnquoteValue(value)
 	if v == "" || filepath.IsAbs(v) || strings.HasPrefix(v, "/") || strings.HasPrefix(v, "\\") {
 		return value
 	}
-	return `"` + filepath.ToSlash(filepath.Join(baseDir, v)) + `"`
+	return QuotePath(filepath.Join(baseDir, v))
 }
 
 // Parse разбирает текст настроек (относительные пути не пересчитываются).
@@ -96,6 +102,7 @@ func ParseBase(text, baseDir string) (*Config, error) {
 	sc := bufio.NewScanner(strings.NewReader(text))
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	cfg := &Config{}
+	sawHSDir := false
 	n := 0
 	for sc.Scan() {
 		n++
@@ -124,9 +131,14 @@ func ParseBase(text, baseDir string) (*Config, error) {
 				return nil, fmt.Errorf("строка %d: %s: %w", n, name, err)
 			}
 			cfg.Maps = append(cfg.Maps, r)
+		case strings.HasPrefix(key, hiddenServicePrefix) && key != "hiddenservicedir" && !sawHSDir:
+			cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("строка %d: %s без HiddenServiceDir выше пропущена (Tor такую настройку не принимает; раскомментируйте HiddenServiceDir)", n, name))
 		case replacedByUpstream[key]:
 			cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("строка %d: %s игнорируется (используйте Upstream)", n, name))
 		default:
+			if key == "hiddenservicedir" {
+				sawHSDir = true
+			}
 			if baseDir != "" && pathDirectives[key] && value != "" {
 				value = resolvePath(value, baseDir)
 			}
